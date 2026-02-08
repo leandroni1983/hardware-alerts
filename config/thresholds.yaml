@@ -1,0 +1,4 @@
+# thresholds.yaml - price thresholds per product or category
+thresholds:
+  default_drop_pct: 20
+  products: {}

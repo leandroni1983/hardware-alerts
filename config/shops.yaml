@@ -1,0 +1,17 @@
+# shops.yaml - list of shops and metadata
+shops:
+  - id: compra_gamer
+    name: Compra Gamer
+    base_url: https://compragamer.com
+  - id: venex
+    name: Venex
+    base_url: https://www.venex.com.ar/
+  - id: mexx
+    name: Mexx
+    base_url: https://www.mexx.com.ar/
+  - id: fullh4rd
+    name: Fullh4rd
+    base_url: https://fullh4rd.com.ar/
+  - id: gezatek
+    name: Gezatek
+    base_url: https://www.gezatek.com.ar/

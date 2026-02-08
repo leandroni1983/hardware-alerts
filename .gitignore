@@ -1,0 +1,14 @@
+# Virtualenvs
+.venv/
+venv/
+
+# Editor/IDE
+.venv
+.zed
+
+# Other
+.continue
+__pycache__/
+*.pyc
+# backups
+backup/

@@ -1,0 +1,5 @@
+# cron.yaml - schedule configuration (example)
+jobs:
+  - name: scrape_every_15m
+    schedule: "*/15 * * * *"
+    command: "python scraper/scrape_compra_gamer.py"

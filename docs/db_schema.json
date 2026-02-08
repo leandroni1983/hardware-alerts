@@ -1,0 +1,80 @@
+{
+  "db_path": "SCRAPER_DB_PATH or D:/Leandro/basesdedatos/data.db (Windows) or /opt/scraper/data.db (container)",
+  "tables": {
+    "scraped_items": {
+      "description": "Rows of scraped products; product_url is unique; product_key may be NULL.",
+      "columns": [
+        {"name":"id","type":"INTEGER","pk":true},
+        {"name":"shop_id","type":"TEXT","nullable":false},
+        {"name":"shop_name","type":"TEXT","nullable":false},
+        {"name":"category","type":"TEXT"},
+        {"name":"product_name","type":"TEXT","nullable":false},
+        {"name":"price","type":"INTEGER","notes":"currency units, integers (no cents)"},
+        {"name":"stock","type":"INTEGER","notes":"1=in stock, 0=out"},
+        {"name":"product_url","type":"TEXT","nullable":false,"unique":true},
+        {"name":"scraped_at","type":"TEXT","nullable":false},
+        {"name":"summary","type":"TEXT"},
+        {"name":"processed","type":"INTEGER","default":0},
+        {"name":"processed_at","type":"TEXT"},
+        {"name":"product_key","type":"TEXT","notes":"normalizer-produced canonical key"}
+      ]
+    },
+    "scraped_price_history": {
+      "description": "Raw per-URL price timeline (inserted by triggers on scraped_items insert/update).",
+      "columns": [
+        {"name":"id","type":"INTEGER","pk":true},
+        {"name":"product_url","type":"TEXT","nullable":false},
+        {"name":"price","type":"INTEGER"},
+        {"name":"scraped_at","type":"TEXT","nullable":false}
+      ]
+    },
+    "scraped_price_history_key": {
+      "description": "Per product_key + shop price timeline (inserted by triggers when product_key present).",
+      "columns": [
+        {"name":"id","type":"INTEGER","pk":true},
+        {"name":"product_key","type":"TEXT","nullable":false},
+        {"name":"shop_id","type":"TEXT","nullable":false},
+        {"name":"price","type":"INTEGER"},
+        {"name":"scraped_at","type":"TEXT","nullable":false}
+      ]
+    },
+    "scraped_best_offers": {
+      "description": "Computed best offer per product_key recorded_at timestamp.",
+      "columns": [
+        {"name":"id","type":"INTEGER","pk":true},
+        {"name":"product_key","type":"TEXT","nullable":false},
+        {"name":"shop_id","type":"TEXT","nullable":false},
+        {"name":"shop_name","type":"TEXT"},
+        {"name":"product_url","type":"TEXT"},
+        {"name":"price","type":"INTEGER"},
+        {"name":"scraped_at","type":"TEXT","nullable":false},
+        {"name":"recorded_at","type":"TEXT","nullable":false}
+      ],
+      "notes": "Current behavior: compute_and_store_best_offers inserts a single winner per product_key (lowest price, tie-break by shop_id)."
+    }
+  },
+  "indexes": [
+    {"name":"idx_scraped_items_processed","table":"scraped_items","cols":["processed"]},
+    {"name":"idx_scraped_items_scraped_at","table":"scraped_items","cols":["scraped_at"]},
+    {"name":"idx_scraped_items_product_key","table":"scraped_items","cols":["product_key"]},
+    {"name":"idx_scraped_price_history_url","table":"scraped_price_history","cols":["product_url"]},
+    {"name":"idx_scraped_price_history_scraped_at","table":"scraped_price_history","cols":["scraped_at"]},
+    {"name":"idx_scraped_price_history_key","table":"scraped_price_history_key","cols":["product_key","shop_id"]},
+    {"name":"idx_scraped_price_history_key_scraped_at","table":"scraped_price_history_key","cols":["scraped_at"]},
+    {"name":"idx_scraped_best_offers_key","table":"scraped_best_offers","cols":["product_key"]},
+    {"name":"idx_scraped_best_offers_shop","table":"scraped_best_offers","cols":["shop_id"]}
+  ],
+  "triggers": [
+    {"name":"trg_scraped_items_price_insert","on":"AFTER INSERT ON scraped_items","action":"INSERT INTO scraped_price_history (product_url, price, scraped_at) VALUES (new.product_url, new.price, new.scraped_at)"},
+    {"name":"trg_scraped_items_price_update","on":"AFTER UPDATE OF price ON scraped_items WHEN new.price IS NOT old.price","action":"INSERT INTO scraped_price_history (product_url, price, scraped_at) VALUES (new.product_url, new.price, new.scraped_at)"},
+    {"name":"trg_scraped_items_key_price_insert","on":"AFTER INSERT ON scraped_items WHEN new.product_key IS NOT NULL AND new.price IS NOT NULL","action":"INSERT INTO scraped_price_history_key (product_key, shop_id, price, scraped_at) VALUES (new.product_key, new.shop_id, new.price, new.scraped_at)"},
+    {"name":"trg_scraped_items_key_price_update","on":"AFTER UPDATE OF price ON scraped_items WHEN new.product_key IS NOT NULL AND new.price IS NOT old.price","action":"INSERT INTO scraped_price_history_key (product_key, shop_id, price, scraped_at) VALUES (new.product_key, new.shop_id, new.price, new.scraped_at)"}
+  ],
+  "sample_queries": {
+    "best_price_per_shop_for_key": "SELECT shop_id, shop_name, MIN(price) AS min_price FROM scraped_items WHERE product_key = ? AND stock = 1 AND price IS NOT NULL AND scraped_at >= ? GROUP BY shop_id, shop_name;",
+    "min_price_per_key": "SELECT product_key, MIN(price) AS min_price FROM scraped_items WHERE product_key IS NOT NULL AND product_key != '' AND price IS NOT NULL AND stock = 1 AND scraped_at >= ? GROUP BY product_key;",
+    "latest_best_offer_per_key": "SELECT b.* FROM scraped_best_offers b JOIN (SELECT product_key, MAX(recorded_at) AS last_rec FROM scraped_best_offers GROUP BY product_key) m ON b.product_key = m.product_key AND b.recorded_at = m.last_rec ORDER BY b.recorded_at DESC LIMIT ?;",
+    "list_product_keys_with_sample": "SELECT s.product_key, s.product_name AS sample_product_name, s.product_url AS sample_product_url, s.shop_name AS sample_shop_name FROM scraped_items s JOIN (SELECT product_key, MAX(scraped_at) AS last_scraped FROM scraped_items WHERE product_key IS NOT NULL AND product_key != '' GROUP BY product_key) m ON s.product_key = m.product_key AND s.scraped_at = m.last_scraped ORDER BY s.product_key LIMIT ?;"
+  },
+  "notes": "Prices are stored as integer currency units. Gezatek scraper now truncates cents (no rounding). Triggers keep price history in sync. compute_and_store_best_offers records one winner per product_key by design."
+}
