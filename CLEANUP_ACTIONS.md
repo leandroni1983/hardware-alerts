@@ -8,6 +8,8 @@ Resumen de operaciones ejecutadas automáticamente para dejar el repo más proli
 - Añadido `scripts/clean_pycache.ps1` como utilidad para limpiar caches (si se desea, puede moverse a `archive/`).
 - Commits generados: `chore: archive helper cleanup scripts`, `chore: remove __pycache__ and .pyc artifacts`.
 
+- Renombrado `archive/scripts` -> `archive/helpers` para evitar conflicto con `scripts/` en la raíz.
+
 Notas:
 - No se movieron archivos de código fuente esenciales; solo helpers y artefactos.
 - El script original `CLEANUP_PROPOSAL.md` sigue presente con recomendaciones.
