@@ -12,3 +12,12 @@ build
 .env
 .DS_Store
 storage/prices.db
+
+# Local DB folder used by compose bind-mount
+data/
+
+# Ignore local DB copies and temp DB folder used for inspection
+tmp_db/
+
+# Do not include Telegram token file in image
+config/telegram.env

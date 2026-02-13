@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import logging
+import re
+from normalizers.cpu import build_product_key
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -28,8 +30,104 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+# Relevance filtering tokens (duplicate of scraper heuristics to ensure DB-level protection)
+_EXCLUDE_KEYWORDS_DB = [
+    "auricular",
+    "auriculares",
+    "audifono",
+    "audífono",
+    "audifonos",
+    "microfono",
+    "micrófono",
+    "micro",
+    "mic",
+    "headset",
+    "headphones",
+    "headphone",
+    "mouse",
+    "mause",
+    "teclado",
+    "keyboard",
+    "monitor",
+    "camara",
+    "cámara",
+    "webcam",
+    "parlante",
+    "speaker",
+    "impresora",
+    "cargador",
+    "cable",
+    "sd",
+    "microsd",
+    "sdcard",
+]
+
+_WHITELIST_TOKENS_DB = [
+    "ryzen",
+    "intel",
+    "core",
+    "i3",
+    "i5",
+    "i7",
+    "i9",
+    "athlon",
+    "pentium",
+    "xeon",
+    "threadripper",
+    "rx",
+    "rtx",
+    "gtx",
+    "radeon",
+    "vram",
+    "ddr",
+    "ddr4",
+    "ddr5",
+    "ssd",
+    "nvme",
+    "m.2",
+    "m2",
+]
+
+
+def _is_relevant_product_db(title: str | None, category_name: str | None) -> bool:
+    if not title:
+        return False
+    tl = title.lower()
+    # whitelist tokens => relevant
+    for w in _WHITELIST_TOKENS_DB:
+        if w in tl:
+            return True
+    # if category hints CPU/GPU keywords in title, accept
+    for k in ("placa", "placas", "video", "gpu", "rtx", "gtx", "rx", "radeon", "geforce", "procesador", "procesadores", "cpu", "ryzen", "intel", "core", "athlon"):
+        if k in tl:
+            return True
+    # if contains explicit peripheral tokens, reject
+    for ex in _EXCLUDE_KEYWORDS_DB:
+        if ex in tl:
+            return False
+    # fallback: not relevant
+    return False
+
+
 def init_db() -> None:
-    conn = _get_conn()
+    # Ensure DB dir exists and is writable before opening connection
+    db_dir = os.path.dirname(DB_PATH) or '/'
+    try:
+        _ensure_db_dir()
+    except Exception as e:
+        raise RuntimeError(f"Failed to ensure DB directory '{db_dir}': {e}")
+
+    if not os.path.isdir(db_dir):
+        raise RuntimeError(f"DB directory does not exist: {db_dir}")
+    # Check write permission to the directory where DB file will be created
+    if not os.access(db_dir, os.W_OK):
+        raise RuntimeError(f"No write permission for DB directory: {db_dir}. Check mounts/permissions.")
+
+    try:
+        conn = _get_conn()
+    except Exception as e:
+        raise RuntimeError(f"Failed to open SQLite DB at '{DB_PATH}': {e}")
+
     cur = conn.cursor()
     cur.executescript(
         """
@@ -133,6 +231,25 @@ def init_db() -> None:
         """
     )
 
+    # Table to record which offers were notified (to avoid duplicate sends and for audit)
+    cur.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS notified_offers (
+            id INTEGER PRIMARY KEY,
+            product_key TEXT,
+            shop_id TEXT,
+            shop_name TEXT,
+            product_url TEXT,
+            price INTEGER,
+            label TEXT,
+            raw_ai TEXT,
+            notified_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_notified_offers_url ON notified_offers (product_url);
+        CREATE INDEX IF NOT EXISTS idx_notified_offers_key ON notified_offers (product_key);
+        """
+    )
+
     cur.execute("PRAGMA table_info(scraped_items)")
     existing_cols = {row[1] for row in cur.fetchall()}
     if "product_key" not in existing_cols:
@@ -163,6 +280,14 @@ def insert_items(items: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
 
     for item in items:
         try:
+            # DB-level relevance filter: avoid inserting peripherals or unrelated items
+            title = item.get("product_name") or ""
+            if not _is_relevant_product_db(title, item.get("category")):
+                skipped += 1
+                continue
+            # Ensure `product_key` variable exists early to avoid UnboundLocalError.
+            pk = item.get("product_key") or ""
+
             # Normalize certain shop price quirks before inserting.
             # Gezatek historically saved prices with two extra zeros (cents multiplied),
             # heuristically fix values > 1_000_000 that are divisible by 100.
@@ -170,10 +295,22 @@ def insert_items(items: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
             try:
                 if item.get("shop_id") == "gezatek" and price_val is not None:
                     pv = int(price_val)
-                    if pv > 1_000_000 and pv % 100 == 0:
+                    # Gezatek historically sometimes stored prices as integer cents
+                    # (e.g. "269999899" for 2699998.99). Heuristic: if value is
+                    # very large (above 1_000_000), treat as cents and truncate
+                    # to whole currency units by dividing by 100.
+                    if pv > 1_000_000:
                         price_val = pv // 100
             except Exception:
                 price_val = item.get("price")
+
+            # If the scraper provided a generic or empty product_key, compute a
+            # more specific one from the product name using the CPU normalizer.
+            try:
+                if not pk or pk in ("intel", "amd") or not re.search(r"\d", pk):
+                    pk = build_product_key(item.get("product_name") or "")
+            except Exception:
+                pk = item.get("product_key") or ""
 
             cur.execute(
                 """
@@ -198,7 +335,7 @@ def insert_items(items: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
                    OR (excluded.product_key IS NOT NULL AND scraped_items.product_key IS NULL)
                 """,
                 (
-                    item.get("product_key"),
+                    pk,
                     item["shop_id"],
                     item["shop_name"],
                     item.get("category"),
@@ -213,7 +350,7 @@ def insert_items(items: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
             logger.debug(
                 "Upserted product_url=%s product_key=%s price=%s",
                 item.get("product_url"),
-                item.get("product_key"),
+                pk,
                 item.get("price"),
             )
             inserted += 1
@@ -477,6 +614,42 @@ def compute_and_store_best_offers(days: int = 7) -> int:
     conn.commit()
     conn.close()
     return inserted
+
+
+def has_been_notified(product_url: str, shop_id: str, price: int) -> bool:
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1 FROM notified_offers
+        WHERE product_url = ? AND shop_id = ? AND price = ?
+        LIMIT 1
+        """,
+        (product_url, shop_id, price),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def mark_notified_offer(product_key: str | None, shop_id: str, shop_name: str | None, product_url: str, price: int, label: str | None = None, raw_ai: str | None = None) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO notified_offers (product_key, shop_id, shop_name, product_url, price, label, raw_ai, notified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            product_key,
+            shop_id,
+            shop_name,
+            product_url,
+            price,
+            label,
+            raw_ai,
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_best_offers(product_key: Optional[str] = None, limit: int = 100) -> List[sqlite3.Row]:

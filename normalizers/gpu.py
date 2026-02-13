@@ -119,4 +119,5 @@ def build_product_key(product_name: str) -> str:
     if vram:
         parts.append(vram)
 
-    return "_".join(parts)
+    # Use space as separator per user preference (e.g. 'asus rtx 3060 12gb')
+    return " ".join(parts)
