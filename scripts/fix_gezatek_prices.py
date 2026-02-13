@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fix Gezatek historical prices that were stored with extra two zeros.
 
-Heuristic: find rows in `scraped_items` with shop_id='gezatek' and price > 1_000_000
-and price % 100 == 0. For each candidate, new_price = price // 100.
+Heuristic: find rows in `scraped_items` with shop_id='gezatek' and price > 1_000_000.
+Many historic rows were saved with cents concatenated (e.g. 269999899 for 2699998.99),
+so we treat any large value as cents and truncate to whole units by integer-dividing by 100.
 
 This script:
  - makes a backup copy of the DB file
@@ -37,16 +38,15 @@ conn.row_factory = sqlite3.Row
 cur = conn.cursor()
 
 cur.execute(
-    """
-    SELECT id, product_name, price, product_url, scraped_at
-    FROM scraped_items
-    WHERE shop_id = 'gezatek'
-      AND price > ?
-      AND price % ? = 0
-    ORDER BY scraped_at DESC
-    LIMIT ?
-    """,
-    (THRESHOLD, SCALE, LIMIT),
+        """
+        SELECT id, product_name, price, product_url, scraped_at
+        FROM scraped_items
+        WHERE shop_id = 'gezatek'
+            AND price > ?
+        ORDER BY scraped_at DESC
+        LIMIT ?
+        """,
+        (THRESHOLD, LIMIT),
 )
 rows = cur.fetchall()
 

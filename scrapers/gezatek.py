@@ -168,7 +168,21 @@ class GezatekScraper(BaseScraper):
 
                     if price is None:
                         data = await c.get_attribute("data-price")
-                        price = self._parse_price(data) if data else None
+                        if data:
+                            d = (data or "").strip()
+                            # If data-price is a plain integer (likely cents),
+                            # convert accordingly. Otherwise fall back to parser.
+                            if re.fullmatch(r"\d+", d):
+                                try:
+                                    pv = int(d)
+                                    if pv > 1_000_000:
+                                        price = pv // 100
+                                    else:
+                                        price = pv
+                                except Exception:
+                                    price = self._parse_price(data)
+                            else:
+                                price = self._parse_price(data)
 
                     stock = True
                     for ssel in [".stock", ".availability", ".sin-stock", ".no-stock"]:
@@ -189,6 +203,9 @@ class GezatekScraper(BaseScraper):
                         "product_url": url,
                         "scraped_at": datetime.utcnow().isoformat(),
                     }
+                    # Filter irrelevant peripherals (headsets, mics, cables, etc.)
+                    if not self._is_relevant_product(title, category_name):
+                        continue
                     results.append(product)
                     page_items += 1
                 except Exception:

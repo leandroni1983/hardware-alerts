@@ -221,6 +221,9 @@ class MexxScraper(BaseScraper):
                         "product_url": url,
                         "scraped_at": datetime.utcnow().isoformat(),
                     }
+                    # Filter irrelevant peripherals (headsets, mics, cables, etc.)
+                    if not self._is_relevant_product(title, category_name):
+                        continue
                     results.append(product)
                     page_items += 1
                 except Exception:

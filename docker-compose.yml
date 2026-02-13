@@ -7,10 +7,8 @@ services:
     image: hardware-clean-alerts:latest
     working_dir: /app
     volumes:
-      # Source code mounted for development
       - ./:/app:rw
-      # Persistent SQLite data lives on host (Windows path) and is mounted inside container
-      - D:/Leandro/basesdedatos:/opt/scraper:rw
+      - ./data:/opt/scraper
     ports:
       - "8001:8001"
     environment:
@@ -30,8 +28,7 @@ services:
     volumes:
       # Same code mount for consistency
       - ./:/app:rw
-      # Same persistent DB mount
-      - D:/Leandro/basesdedatos:/opt/scraper:rw
+      - ./data:/opt/scraper
     environment:
       - PYTHONUNBUFFERED=1
       - TELEGRAM_TOKEN_FILE=/app/config/telegram.env
@@ -39,6 +36,46 @@ services:
     # One-off job process
     command: python runner.py
     depends_on: []
+
+  # Alerter worker: periodically checks DB for offers and notifies via Telegram
+  alerter:
+    build: .
+    image: hardware-clean-alerts:latest
+    working_dir: /app
+    volumes:
+      - ./:/app:rw
+      - ./data:/opt/scraper
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN_FILE=/app/config/telegram.env
+      - SCRAPER_DB_PATH=/opt/scraper/data.db
+      - ALERT_INTERVAL_MIN=10
+      - NOTIFY_SEND=false
+      - AI_ENABLED=true
+      - SEND_ONLY_REAL=true
+      - NOTIFY_LIMIT_KEYS=500
+      - NOTIFY_MIN_SAMPLES=5
+      - NOTIFY_THRESHOLD_PCT=15
+    command: python worker/alerter.py
+    depends_on: [runner]
+
+  # Telegram listener: responde a comandos /best en el grupo
+  telegram-listener:
+    build: .
+    image: hardware-clean-alerts:latest
+    working_dir: /app
+    volumes:
+      - ./:/app:rw
+      - ./data:/opt/scraper
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN_FILE=/app/config/telegram.env
+      - SCRAPER_DB_PATH=/opt/scraper/data.db
+    command: python scripts/telegram_listener.py
+    depends_on: [alerter]
+
+# Use a Docker named volume for the SQLite DB to avoid Windows filesystem I/O issues
+## Note: DB files are stored under ./data (bind-mounted) to be accessible from Windows.
 
 # Note: Playwright requires additional setup in Docker (install browsers).
 # This compose file expects you to build an image with Playwright installed.

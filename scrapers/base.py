@@ -11,6 +11,7 @@ from typing import List, Tuple
 from urllib.parse import urljoin
 
 from playwright.async_api import Page, async_playwright
+from normalizers import normalize_product
 
 
 class BaseScraper(abc.ABC):
@@ -66,6 +67,63 @@ class BaseScraper(abc.ABC):
                 "athlon",
             ],
         }
+        # Filtering tokens for relevance (used to avoid scraping peripherals)
+        self._exclude_keywords = [
+            "auricular",
+            "auriculares",
+            "audifono",
+            "audífono",
+            "audifonos",
+            "microfono",
+            "micrófono",
+            "micro",
+            "mic",
+            "headset",
+            "headphones",
+            "headphone",
+            "mouse",
+            "mause",
+            "teclado",
+            "keyboard",
+            "monitor",
+            "camara",
+            "cámara",
+            "webcam",
+            "parlante",
+            "speaker",
+            "impresora",
+            "cargador",
+            "cable",
+            "sd",
+            "microsd",
+            "sdcard",
+        ]
+
+        self._whitelist_tokens = [
+            "ryzen",
+            "intel",
+            "core",
+            "i3",
+            "i5",
+            "i7",
+            "i9",
+            "athlon",
+            "pentium",
+            "xeon",
+            "threadripper",
+            "rx",
+            "rtx",
+            "gtx",
+            "radeon",
+            "vram",
+            "ddr",
+            "ddr4",
+            "ddr5",
+            "ssd",
+            "nvme",
+            "m.2",
+            "m2",
+        ]
 
     async def _start(self):
         self._playwright = await async_playwright().start()
@@ -171,6 +229,33 @@ class BaseScraper(abc.ABC):
         except Exception:
             return None
 
+    def _is_relevant_product(self, title: str | None, category_name: str | None) -> bool:
+        """Heuristic to decide if a scraped title belongs to the target categories (CPU/GPU).
+
+        Rules:
+          - If title/category clearly match GPU/CPU via `_is_category_match` -> relevant.
+          - If title contains exclude keywords (peripherals) -> not relevant.
+          - If title contains whitelist tokens (ryzen, rtx, ddr5, nvme, etc.) -> relevant.
+        """
+        if not title:
+            return False
+        if self._is_category_match(category_name, title):
+            return True
+        tl = title.lower()
+        # If contains any whitelist token, accept
+        for w in self._whitelist_tokens:
+            if w in tl:
+                return True
+        # If contains known exclude keywords, reject
+        for ex in self._exclude_keywords:
+            if ex in tl:
+                return False
+        # fallback: accept if any GPU/CPU category keyword present in title
+        for k in self.category_keywords.get("gpu", []) + self.category_keywords.get("cpu", []):
+            if k in tl:
+                return True
+        return False
+
     def _debug_enabled(self) -> bool:
         return os.getenv("SCRAPER_DEBUG") == "1"
 
@@ -234,6 +319,15 @@ class BaseScraper(abc.ABC):
                     items = await self.scrape_category(page, url, category_name)
                     if limit_per_category:
                         items = items[:limit_per_category]
+                    # Normalize items (generate `product_key`) before returning
+                    for it in items:
+                        try:
+                            # normalize_product expects a dict with 'title' key
+                            np = normalize_product.normalize({"title": it.get("product_name")})
+                            if np.get("product_key"):
+                                it["product_key"] = np.get("product_key")
+                        except Exception:
+                            pass
                     results.extend(items)
                     await self._wait_random(1.0, 2.0)
                 except Exception:

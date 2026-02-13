@@ -12,3 +12,6 @@ __pycache__/
 *.pyc
 # backups
 backup/
+
+# Docker-mounted DB folder
+data/

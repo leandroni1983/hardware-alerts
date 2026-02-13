@@ -210,6 +210,10 @@ class CompraGamerScraper(BaseScraper):
                     continue
                 seen_urls.add(url)
 
+                # Filter irrelevant peripherals (headsets, mics, cables, etc.)
+                if not self._is_relevant_product(title, category_name):
+                    continue
+
                 results.append(
                     {
                         "shop_id": self.shop_id,
