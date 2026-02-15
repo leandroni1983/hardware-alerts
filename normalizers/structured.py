@@ -88,9 +88,9 @@ def parse_title(title: str) -> Dict[str, Optional[str]]:
                 variant = v
                 break
 
-    # derive series for numeric models: 3060 -> 3000, 7600 -> 7000, 4060 -> 4000
+    # derive series only for numeric-leading models: 3060 -> 3000, 7600 -> 7000, 4060 -> 4000
     series = None
-    if model:
+    if model and model[0].isdigit():
         m_digits = re.search(r'\d{3,4}', model)
         if m_digits:
             try:
