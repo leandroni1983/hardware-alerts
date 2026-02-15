@@ -15,6 +15,7 @@ services:
       - PYTHONUNBUFFERED=1
       - TELEGRAM_TOKEN_FILE=/app/config/telegram.env
       - SCRAPER_DB_PATH=/opt/scraper/data.db
+      - PRODUCTS_DB=/opt/scraper/data.db
     # API server process
     command: uvicorn main:app --host 0.0.0.0 --port 8001
     depends_on: []
@@ -71,7 +72,13 @@ services:
       - PYTHONUNBUFFERED=1
       - TELEGRAM_TOKEN_FILE=/app/config/telegram.env
       - SCRAPER_DB_PATH=/opt/scraper/data.db
-    command: python scripts/telegram_listener.py
+      - PRODUCTS_DB=/opt/scraper/data.db
+
+    # Run the async bot. The startup command reads TELEGRAM_TOKEN from the
+    # mounted /app/config/telegram.env and exports it, then starts the async
+    # bot. This avoids changing the repo's env files while providing the
+    # TELEGRAM_TOKEN expected by `telegram_async_bot.py`.
+    command: ["sh", "-c", "export TELEGRAM_TOKEN=$(grep '^TELEGRAM_TOKEN=' /app/config/telegram.env | cut -d= -f2-) && python scripts/telegram_async_bot.py"]
     depends_on: [alerter]
 
 # Use a Docker named volume for the SQLite DB to avoid Windows filesystem I/O issues

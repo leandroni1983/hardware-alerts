@@ -2,7 +2,7 @@ import os
 import sqlite3
 import logging
 import re
-from normalizers.cpu import build_product_key
+from normalizers.normalize_product import normalize as normalize_product
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -305,10 +305,13 @@ def insert_items(items: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
                 price_val = item.get("price")
 
             # If the scraper provided a generic or empty product_key, compute a
-            # more specific one from the product name using the CPU normalizer.
+            # more specific one from the product name using the unified
+            # normalizers package which detects GPU vs CPU and builds the
+            # appropriate key.
             try:
                 if not pk or pk in ("intel", "amd") or not re.search(r"\d", pk):
-                    pk = build_product_key(item.get("product_name") or "")
+                    normalized = normalize_product({"title": item.get("product_name") or ""})
+                    pk = normalized.get("product_key") or item.get("product_key") or ""
             except Exception:
                 pk = item.get("product_key") or ""
 

@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from notifier import telegram_bot
+from storage import conversations
 
 
 def load_token():
@@ -189,8 +190,232 @@ def main():
                 cmd = parts[0].lower()
                 args = parts[1:]
                 print('Received', cmd, args, 'from', user)
+
+                # Guided `/buscar` flow: start when user issues /buscar, or continue when state exists
+                state = conversations.get_state(chat_id)
+                if cmd in ('/buscar', '/browse', '/browser'):
+                    conversations.set_state(chat_id, 'AWAIT_CATEGORY', {})
+                    send_text(token, chat_id, 'Iniciando búsqueda guiada. Responde con: "Procesadores" o "Placas de video". Escribe "Cancelar" para salir.')
+                    continue
+                # If we're in a guided state and the user sent non-command text,
+                # handle it according to the stage.
+                if state and not text.strip().startswith('/'):
+                    stage = state.get('stage')
+                    data = state.get('data') or {}
+                    ut = text.strip()
+                    lcu = ut.lower()
+
+                    # Helpers
+                    def send_options(msg, buttons: list[list[str]] | None = None):
+                        if buttons:
+                            try:
+                                telegram_bot.send_with_keyboard(token, str(chat_id), msg, buttons, parse_mode=None)
+                                return
+                            except Exception:
+                                # fallback to plain text
+                                pass
+                        send_text(token, chat_id, msg)
+
+                    if stage == 'AWAIT_CATEGORY':
+                        if lcu in ('procesadores', 'procesador', 'cpu'):
+                            conversations.set_state(chat_id, 'AWAIT_CPU_BRAND', {'category': 'cpu'})
+                            send_options('Has elegido Procesadores. Elige marca:', buttons=[['Intel','AMD'],['Volver','Cancelar']])
+                        elif lcu in ('placas de video', 'placa de video', 'gpu', 'placas'):
+                            conversations.set_state(chat_id, 'AWAIT_GPU_BRAND', {'category': 'gpu'})
+                            send_options('Has elegido Placas de video. Elige marca:', buttons=[['AMD','Intel','Radeon'],['Volver','Cancelar']])
+                        elif lcu in ('cancelar', 'salir'):
+                            conversations.clear_state(chat_id)
+                            send_options('Búsqueda cancelada.')
+                        else:
+                            send_options('Opción no reconocida. Responde: "Procesadores" o "Placas de video" o "Cancelar".')
+                        continue
+
+                    if stage == 'AWAIT_CPU_BRAND':
+                        if lcu in ('intel', 'amd'):
+                            data['brand'] = lcu
+                            # Ask for CPU family/generation next
+                            conversations.set_state(chat_id, 'AWAIT_CPU_FAMILY', data)
+                            if lcu == 'intel':
+                                # generations + Pentium/Celeron
+                                send_options('Elige generación o tipo Intel:', buttons=[['14','13','12'],['11','Pentium','Celeron'],['Otro','Volver']])
+                            else:
+                                # AMD families (Ryzen series)
+                                send_options('Elige familia AMD/Ryzen:', buttons=[['Ryzen 7000','Ryzen 5000'],['Ryzen 3000','Otro'],['Volver']])
+                        elif lcu in ('volver', 'atrás', 'atras'):
+                            conversations.set_state(chat_id, 'AWAIT_CATEGORY', {})
+                            send_options('Elige categoría:', buttons=[['Procesadores','Placas de video'],['Cancelar']])
+                        elif lcu in ('cancelar', 'salir'):
+                            conversations.clear_state(chat_id)
+                            send_options('Búsqueda cancelada.')
+                        else:
+                            # re-send brand keyboard to avoid forcing typing
+                            send_options('Respuesta no válida. Elige marca:', buttons=[['Intel','AMD'],['Volver','Cancelar']])
+                        continue
+
+                    if stage == 'AWAIT_CPU_MODEL':
+                        if lcu in ('volver', 'atrás', 'atras'):
+                            conversations.set_state(chat_id, 'AWAIT_CPU_BRAND', {'category': 'cpu'})
+                            send_options('¿Intel o AMD?')
+                            continue
+                        if lcu in ('cancelar', 'salir'):
+                            conversations.clear_state(chat_id)
+                            send_options('Búsqueda cancelada.')
+                            continue
+                        # perform aggregated search and return top results
+                        # Support buttons that may contain a placeholder like
+                        # '{fam}600' when the family wasn't formatted client-side.
+                        resolved = ut.replace('{fam}', data.get('family', ''))
+                        # If the user sent only the numeric part (e.g. '12400' or '600'),
+                        # prepend the family prefix (e.g. 'i5' or 'rx') to improve matching.
+                        fam = data.get('family', '') or ''
+                        fam_prefix = fam.split()[0] if fam else ''
+                        if fam_prefix and fam_prefix not in resolved.lower() and any(ch.isdigit() for ch in resolved):
+                            query = f"{fam_prefix} {resolved}"
+                        else:
+                            query = resolved
+                        # log resolved query for debugging
+                        print('Resolved CPU model query:', query)
+                        code = ' '.join(''.join(ch for ch in part if ch.isalnum()) for part in query.split())
+                        found_list = find_cheapest_all_by_code(DB_PATH, code, limit=5)
+                        conversations.clear_state(chat_id)
+                        if not found_list:
+                            # Fallback: try single-item name search in product_name
+                            single = find_cheapest_by_code(DB_PATH, code)
+                            if single:
+                                txt = f"*Mejor {query} encontrada*\n{single['product_name']}\nPrecio: *${single['price']:,}*\nTienda: {single['shop_name']}\n{single['product_url']}"
+                                send_text(token, chat_id, txt)
+                            else:
+                                send_text(token, chat_id, f'No encontré ofertas para "{query}"')
+                        else:
+                            lines = [f"Top {len(found_list)} resultados para '{query}':"]
+                            for it in found_list:
+                                lines.append(f"{it.get('product_key') or it.get('product_name')}: ${it['price']:,} — {it['shop_name']}\n{it['product_url']}")
+                            send_text(token, chat_id, "\n\n".join(lines))
+                        continue
+                    if stage == 'AWAIT_CPU_FAMILY':
+                        if lcu in ('volver', 'atrás', 'atras'):
+                            conversations.set_state(chat_id, 'AWAIT_CPU_BRAND', {'category': 'cpu'})
+                            send_options('Elige marca:', buttons=[['Intel','AMD'],['Cancelar']])
+                            continue
+                        if lcu in ('cancelar', 'salir'):
+                            conversations.clear_state(chat_id)
+                            send_options('Búsqueda cancelada.')
+                            continue
+                        # record family/generation and prompt example models as buttons
+                        data['family'] = lcu
+                        conversations.set_state(chat_id, 'AWAIT_CPU_MODEL', data)
+                        fam = lcu.lower()
+                        # Intel generations (numeric) or Pentium/Celeron
+                        if fam in ('14','13','12','11'):
+                            send_options('Elige modelo (ej):', buttons=[[f'i9 {fam}900','i7 {fam}700','i5 {fam}600'],['Otro','Volver','Cancelar']])
+                        elif fam in ('pentium','celeron'):
+                            send_options('Elige modelo Pentium/Celeron (ej):', buttons=[['Pentium G6400','Celeron G6900','Otro'],['Volver','Cancelar']])
+                        elif 'ryzen' in fam or 'amd' in fam:
+                            send_options('Elige modelo (ej):', buttons=[['Ryzen 9 7950','Ryzen 7 7700','Ryzen 5 7600'],['Otro','Volver','Cancelar']])
+                        else:
+                            send_options('Elige modelo o selecciona "Otro" para escribir uno:', buttons=[['Otro','Volver','Cancelar']])
+                        continue
+
+                    if stage == 'AWAIT_GPU_BRAND':
+                        if lcu in ('amd', 'intel', 'radeon', 'nvidia'):
+                            data['brand'] = lcu
+                            # Ask for GPU family next (e.g., RTX 40, RX 7000, Arc A7)
+                            conversations.set_state(chat_id, 'AWAIT_GPU_FAMILY', data)
+                            brand = lcu
+                            if brand in ('nvidia', 'nvidia'):
+                                send_options('Elige familia NVIDIA:', buttons=[['RTX 40','RTX 30'],['GTX','Otro'],['Volver','Cancelar']])
+                            elif brand in ('amd', 'radeon'):
+                                send_options('Elige familia AMD/Radeon:', buttons=[['RX 7000','RX 6000'],['RX 500','Otro'],['Volver','Cancelar']])
+                            else:
+                                # Intel
+                                send_options('Elige familia Intel Arc:', buttons=[['Arc A7','Arc A5'],['Otro'],['Volver','Cancelar']])
+                        elif lcu in ('volver', 'atrás', 'atras'):
+                            conversations.set_state(chat_id, 'AWAIT_CATEGORY', {})
+                            send_options('Elige categoría:', buttons=[['Procesadores','Placas de video'],['Cancelar']])
+                        elif lcu in ('cancelar', 'salir'):
+                            conversations.clear_state(chat_id)
+                            send_options('Búsqueda cancelada.')
+                        else:
+                            # resend the GPU brand keyboard to avoid typing
+                            send_options('Respuesta no válida. Elige marca:', buttons=[['AMD','Intel','Radeon'],['Volver','Cancelar']])
+                        continue
+
+                    if stage == 'AWAIT_GPU_MODEL':
+                        if lcu in ('volver', 'atrás', 'atras'):
+                            conversations.set_state(chat_id, 'AWAIT_GPU_BRAND', {'category': 'gpu'})
+                            send_options('¿AMD, Intel o Radeon?')
+                            continue
+                        if lcu in ('cancelar', 'salir'):
+                            conversations.clear_state(chat_id)
+                            send_options('Búsqueda cancelada.')
+                            continue
+                        # Replace placeholder tokens if present (e.g. '{fam}600')
+                        resolved = ut.replace('{fam}', data.get('family', ''))
+                        # Prepend family prefix if user entered only numeric model
+                        fam = data.get('family', '') or ''
+                        fam_prefix = fam.split()[0] if fam else ''
+                        if fam_prefix and fam_prefix not in resolved.lower() and any(ch.isdigit() for ch in resolved):
+                            query = f"{fam_prefix} {resolved}"
+                        else:
+                            query = resolved
+                        print('Resolved GPU model query:', query)
+                        code = ' '.join(''.join(ch for ch in part if ch.isalnum()) for part in query.split())
+                        found_list = find_cheapest_all_by_code(DB_PATH, code, limit=5)
+                        conversations.clear_state(chat_id)
+                        if not found_list:
+                            single = find_cheapest_by_code(DB_PATH, code)
+                            if single:
+                                txt = f"*Mejor {query} encontrada*\n{single['product_name']}\nPrecio: *${single['price']:,}*\nTienda: {single['shop_name']}\n{single['product_url']}"
+                                send_text(token, chat_id, txt)
+                            else:
+                                send_text(token, chat_id, f'No encontré ofertas para "{query}"')
+                        else:
+                            lines = [f"Top {len(found_list)} resultados para '{query}':"]
+                            for it in found_list:
+                                lines.append(f"{it.get('product_key') or it.get('product_name')}: ${it['price']:,} — {it['shop_name']}\n{it['product_url']}")
+                            send_text(token, chat_id, "\n\n".join(lines))
+                        continue
+                    if stage == 'AWAIT_GPU_FAMILY':
+                        # user selected a GPU family (e.g., 'RTX 40' or 'RX 7000')
+                        if lcu in ('volver', 'atrás', 'atras'):
+                            conversations.set_state(chat_id, 'AWAIT_GPU_BRAND', {'category': 'gpu'})
+                            send_options('¿AMD, Intel o Radeon?', buttons=[['AMD','Intel','Radeon'],['Cancelar']])
+                            continue
+                        if lcu in ('cancelar', 'salir'):
+                            conversations.clear_state(chat_id)
+                            send_options('Búsqueda cancelada.')
+                            continue
+                        # Accept family selection or 'Otro'
+                        data['family'] = lcu
+                        conversations.set_state(chat_id, 'AWAIT_GPU_MODEL', data)
+                        fam = lcu
+                        # Provide example models for common families
+                        if 'rtx' in fam:
+                            send_options('Elige modelo (ej):', buttons=[['rtx 4090','rtx 4080','rtx 4070'],['Otro','Volver','Cancelar']])
+                        elif 'rx 7000' in fam or 'rx7000' in fam or 'rx' in fam:
+                            send_options('Elige modelo (ej):', buttons=[['rx 7900','rx 7800','rx 7700'],['Otro','Volver','Cancelar']])
+                        elif 'arc' in fam:
+                            send_options('Elige modelo (ej):', buttons=[['arc a770','arc a750','arc a580'],['Otro','Volver','Cancelar']])
+                        elif 'gtx' in fam:
+                            send_options('Elige modelo (ej):', buttons=[['gtx 1660','gtx 1650','Otro'],['Volver','Cancelar']])
+                        else:
+                            send_options('Escribe el modelo o selecciona "Otro" para escribirlo.', buttons=[['Otro','Volver','Cancelar']])
+                        continue
                 if cmd in ('/start', '/help'):
-                    help_text = ("Comandos disponibles:\n" "- /best <modelo|codigo>  — devuelve la mejor oferta (ej: /best 5060, /best i7 14)\n")
+                    help_text = (
+                        "Hola — comandos disponibles:\n"
+                        "/best <modelo|codigo> - Devuelve la mejor oferta para un modelo o código.\n"
+                        "  Ejemplos: /best 5060, /best i5 12400, /best i7 14\n"
+                        "/bestall <codigo> [n] - Devuelve los mejores resultados por producto (top n).\n"
+                        "  Ejemplo: /bestall 5060 5\n"
+                        "/buscar - Flujo guiado para buscar productos paso a paso.\n"
+                        "  Flujo: 1) Elige categoría: 'Procesadores' o 'Placas de video'\n"
+                        "         2) Elige marca: (Procesadores) 'Intel'/'AMD' ; (Placas) 'AMD'/'Intel'/'Radeon'\n"
+                        "         3) Escribe modelo (ej: 'i5 12400', 'rtx 4060', 'rx 7600')\n"
+                        "  Dentro del flujo puedes escribir 'Volver' para retroceder o 'Cancelar' para salir.\n"
+                        "Alias: /buscar -> /best (entrada guiada), /buscarall -> /bestall\n"
+                        "Más ayuda: /help\n"
+                    )
                     send_text(token, chat_id, help_text)
                     continue
                 if cmd == '/best':
