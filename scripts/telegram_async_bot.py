@@ -156,6 +156,13 @@ def detect_gpu_families(conn: sqlite3.Connection, brand_token: str) -> List[Tupl
         else:
             rows = []
     families: Dict[str, None] = {}
+    # Special-case: Intel ARC has no numeric family tiers (don't expose 'ARC 5000').
+    if token == 'arc':
+        # if any row contains 'arc', return single ARC family without numeric key
+        if rows:
+            return [("ARC", "")]
+        else:
+            return []
 
     # Find numeric model tokens after the brand token or anywhere in slug
     # Example: 'msi rtx 5080 16gb' -> captures 5080 -> family 5000 -> key '50'
