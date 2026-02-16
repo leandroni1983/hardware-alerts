@@ -2,7 +2,7 @@ import os
 import sqlite3
 import logging
 import re
-from normalizers.cpu import build_product_key
+from normalizers.normalize_product import normalize as normalize_product
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -254,6 +254,17 @@ def init_db() -> None:
     existing_cols = {row[1] for row in cur.fetchall()}
     if "product_key" not in existing_cols:
         cur.execute("ALTER TABLE scraped_items ADD COLUMN product_key TEXT")
+    # Add structured columns if missing (brand, line, series, model, variant)
+    if "brand" not in existing_cols:
+        cur.execute("ALTER TABLE scraped_items ADD COLUMN brand TEXT")
+    if "line" not in existing_cols:
+        cur.execute("ALTER TABLE scraped_items ADD COLUMN line TEXT")
+    if "series" not in existing_cols:
+        cur.execute("ALTER TABLE scraped_items ADD COLUMN series TEXT")
+    if "model" not in existing_cols:
+        cur.execute("ALTER TABLE scraped_items ADD COLUMN model TEXT")
+    if "variant" not in existing_cols:
+        cur.execute("ALTER TABLE scraped_items ADD COLUMN variant TEXT")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_scraped_items_product_key ON scraped_items (product_key)"
     )
@@ -305,21 +316,46 @@ def insert_items(items: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
                 price_val = item.get("price")
 
             # If the scraper provided a generic or empty product_key, compute a
-            # more specific one from the product name using the CPU normalizer.
+            # more specific one from the product name using the unified
+            # normalizers package which detects GPU vs CPU and builds the
+            # appropriate key. Also extract structured fields for DB columns.
             try:
                 if not pk or pk in ("intel", "amd") or not re.search(r"\d", pk):
-                    pk = build_product_key(item.get("product_name") or "")
+                    normalized = normalize_product({"title": item.get("product_name") or ""})
+                    pk = normalized.get("product_key") or item.get("product_key") or ""
+                    brand_col = normalized.get('brand')
+                    line_col = normalized.get('line')
+                    series_col = normalized.get('series')
+                    model_col = normalized.get('model')
+                    variant_col = normalized.get('variant')
+                else:
+                    brand_col = item.get('brand')
+                    line_col = item.get('line')
+                    series_col = item.get('series')
+                    model_col = item.get('model')
+                    variant_col = item.get('variant')
             except Exception:
                 pk = item.get("product_key") or ""
+                brand_col = item.get('brand')
+                line_col = item.get('line')
+                series_col = item.get('series')
+                model_col = item.get('model')
+                variant_col = item.get('variant')
 
             cur.execute(
                 """
                 INSERT INTO scraped_items (
-                    product_key, shop_id, shop_name, category, product_name, price, stock,
+                    product_key, brand, line, series, model, variant,
+                    shop_id, shop_name, category, product_name, price, stock,
                     product_url, scraped_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(product_url) DO UPDATE SET
                     product_key = COALESCE(excluded.product_key, scraped_items.product_key),
+                    brand = COALESCE(excluded.brand, scraped_items.brand),
+                    line = COALESCE(excluded.line, scraped_items.line),
+                    series = COALESCE(excluded.series, scraped_items.series),
+                    model = COALESCE(excluded.model, scraped_items.model),
+                    variant = COALESCE(excluded.variant, scraped_items.variant),
                     shop_id = excluded.shop_id,
                     shop_name = excluded.shop_name,
                     category = excluded.category,
@@ -336,6 +372,11 @@ def insert_items(items: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
                 """,
                 (
                     pk,
+                    brand_col,
+                    line_col,
+                    series_col,
+                    model_col,
+                    variant_col,
                     item["shop_id"],
                     item["shop_name"],
                     item.get("category"),
@@ -683,8 +724,9 @@ def get_available_product_keys(prefix: Optional[str] = None, limit: int = 200) -
     if prefix:
         cur.execute(
             """
-            SELECT s.product_key, s.product_name AS sample_product_name, s.product_url AS sample_product_url, s.shop_name AS sample_shop_name, s.price AS sample_price
-            FROM scraped_items s
+                 SELECT s.product_key, s.product_name AS sample_product_name, s.product_url AS sample_product_url, s.shop_name AS sample_shop_name, s.price AS sample_price,
+                     s.brand, s.line, s.series, s.model, s.variant
+                 FROM scraped_items s
             JOIN (
                 SELECT product_key, MAX(scraped_at) AS last_scraped
                 FROM scraped_items
@@ -701,8 +743,9 @@ def get_available_product_keys(prefix: Optional[str] = None, limit: int = 200) -
     else:
                 cur.execute(
                         """
-                        SELECT s.product_key, s.product_name AS sample_product_name, s.product_url AS sample_product_url, s.shop_name AS sample_shop_name, s.price AS sample_price
-                        FROM scraped_items s
+                           SELECT s.product_key, s.product_name AS sample_product_name, s.product_url AS sample_product_url, s.shop_name AS sample_shop_name, s.price AS sample_price,
+                               s.brand, s.line, s.series, s.model, s.variant
+                           FROM scraped_items s
                         JOIN (
                                 SELECT product_key, MAX(scraped_at) AS last_scraped
                                 FROM scraped_items
@@ -727,6 +770,11 @@ def get_available_product_keys(prefix: Optional[str] = None, limit: int = 200) -
                 "sample_product_url": r[2] or "",
                 "sample_shop_name": r[3] or "",
                 "sample_price": int(r[4]) if r[4] is not None else None,
+                "brand": r[5] if len(r) > 5 else None,
+                "line": r[6] if len(r) > 6 else None,
+                "series": r[7] if len(r) > 7 else None,
+                "model": r[8] if len(r) > 8 else None,
+                "variant": r[9] if len(r) > 9 else None,
             }
         )
     return results

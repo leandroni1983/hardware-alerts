@@ -36,7 +36,7 @@ def _escape_markdown_v2(text: str) -> str:
     return ''.join(('\\' + c) if c in special else c for c in text)
 
 
-def send_message(token: str, chat_id: str, text: str, parse_mode: str = 'MarkdownV2', retries: int = 3, backoff: float = 1.5, timeout: int = 15) -> dict:
+def send_message(token: str, chat_id: str, text: str, parse_mode: str = 'MarkdownV2', reply_markup: dict | None = None, retries: int = 3, backoff: float = 1.5, timeout: int = 15) -> dict:
     """Send message with simple retries and exponential backoff.
 
     Parameters configurable per-call. Returns Telegram JSON response on success
@@ -50,6 +50,8 @@ def send_message(token: str, chat_id: str, text: str, parse_mode: str = 'Markdow
             payload = {'chat_id': chat_id, 'text': text}
             if parse_mode:
                 payload['parse_mode'] = parse_mode
+            if reply_markup is not None:
+                payload['reply_markup'] = reply_markup
             resp = requests.post(url, json=payload, timeout=timeout)
             # raise for non-200 statuses to trigger retries
             resp.raise_for_status()
@@ -140,6 +142,20 @@ def send_offer(product: dict, price: int, avg30: float, best_shop: str | None = 
 
     text = format_offer_message(product, price, avg30, best_shop=best_shop, best_price=best_price)
     return send_message(token, chat_id, text)
+
+
+def make_keyboard(button_rows: list[list[str]]) -> dict:
+    """Return a Telegram reply_markup keyboard given rows of button labels."""
+    return {
+        'keyboard': button_rows,
+        'one_time_keyboard': True,
+        'resize_keyboard': True,
+    }
+
+
+def send_with_keyboard(token: str, chat_id: str, text: str, button_rows: list[list[str]], parse_mode: str = None) -> dict:
+    rm = make_keyboard(button_rows)
+    return send_message(token, chat_id, text, parse_mode=parse_mode, reply_markup=rm)
 
 
 if __name__ == '__main__':

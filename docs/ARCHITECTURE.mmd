@@ -1,0 +1,29 @@
+flowchart LR
+  subgraph Scrapers
+    S1[Scrapers (scrapers/*)\nPlaywright/requests] -->|items| Runner[Runner / services.scraper_runner]
+  end
+
+  Runner -->|insert_items()| DB[SQLite (data/data.db)\nscraped_items]
+
+  DB --> PriceHist[scraped_price_history \n(triggers)]
+  DB --> PriceKey[scraped_price_history_key \n(triggers)]
+  DB --> Best[scraped_best_offers]
+
+  subgraph Processing
+    RunnerJobs[Runner: normalization + summaries] --> Best
+    Alerter[worker/alerter.py] -->|reads| Best
+  end
+
+  Alerter -->|send_offer()| Notifier[notifier/telegram_bot.py]
+  Notifier -->|Telegram Bot API| Telegram[(Telegram Chat)]
+
+  Listener[scripts/telegram_async_bot.py] -->|commands (/best)| DB
+  API[FastAPI (main.py)] -->|HTTP| DB
+
+  note right of DB
+    product_key links items, histories and best_offers
+  end
+
+  style DB fill:#f9f,stroke:#333,stroke-width:1px
+  style Notifier fill:#efe,stroke:#333
+  style Alerter fill:#ffe,stroke:#333

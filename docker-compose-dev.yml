@@ -1,0 +1,64 @@
+services:
+  app-dev:
+    build: .
+    image: hardware-clean-alerts-dev:dev
+    container_name: hardware-alerts-app-dev
+    working_dir: /app
+    volumes:
+      - ./:/app:rw
+      - ./data-dev:/opt/scraper
+    ports:
+      - "8002:8001"   # puerto distinto al prod
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN_FILE=/app/config/telegramdev.env
+      - SCRAPER_DB_PATH=/opt/scraper/datadev.db
+      - PRODUCTS_DB=/opt/scraper/datadev.db
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+
+  runner-dev:
+    image: hardware-clean-alerts-dev:dev
+    container_name: hardware-alerts-runner-dev
+    working_dir: /app
+    volumes:
+      - ./:/app:rw
+      - ./data-dev:/opt/scraper
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN_FILE=/app/config/telegramdev.env
+      - SCRAPER_DB_PATH=/opt/scraper/datadev.db
+    command: python runner.py
+
+  alerter-dev:
+    image: hardware-clean-alerts-dev:dev
+    container_name: hardware-alerts-alerter-dev
+    working_dir: /app
+    volumes:
+      - ./:/app:rw
+      - ./data-dev:/opt/scraper
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN_FILE=/app/config/telegramdev.env
+      - SCRAPER_DB_PATH=/opt/scraper/datadev.db
+      - ALERT_INTERVAL_MIN=5
+      - NOTIFY_SEND=true
+      - AI_ENABLED=true
+      - SEND_ONLY_REAL=true
+      - NOTIFY_LIMIT_KEYS=200
+      - NOTIFY_MIN_SAMPLES=3
+      - NOTIFY_THRESHOLD_PCT=10
+    command: python worker/alerter.py
+
+  telegram-listener-dev:
+    image: hardware-clean-alerts-dev:dev
+    container_name: hardware-alerts-telegram-dev
+    working_dir: /app
+    volumes:
+      - ./:/app:rw
+      - ./data-dev:/opt/scraper
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN_FILE=/app/config/telegramdev.env
+      - SCRAPER_DB_PATH=/opt/scraper/datadev.db
+      - PRODUCTS_DB=/opt/scraper/datadev.db
+    command: ["sh", "-c", "export TELEGRAM_TOKEN=$(grep '^TELEGRAM_TOKEN=' /app/config/telegramdev.env | cut -d= -f2-) && python scripts/telegram_async_bot.py"]
