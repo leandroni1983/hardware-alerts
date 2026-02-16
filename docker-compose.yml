@@ -1,4 +1,4 @@
-version: "3.8"
+9version: "3.8"
 
 services:
   # API service: runs FastAPI (main.py)
@@ -10,7 +10,7 @@ services:
       - ./:/app:rw
       - ./data:/opt/scraper
     ports:
-      - "8001:8001"
+      - "9001:8001"
     environment:
       - PYTHONUNBUFFERED=1
       - TELEGRAM_TOKEN_FILE=/app/config/telegram.env

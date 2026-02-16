@@ -23,18 +23,30 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# DB path fallback: prefer environment, otherwise try package scraper_db
-DB_PATH = os.environ.get(
-    "PRODUCTS_DB",
-    os.path.join(os.path.dirname(__file__), "..", "data", "products.db"),
-)
-try:
-    # prefer project's storage.scraper_db.DB_PATH when available
-    from storage import scraper_db as _sd
+# DB path resolution:
+# 1) prefer explicit SCRAPER_DB_PATH env (used by services)
+# 2) then PRODUCTS_DB env for backwards compatibility
+# 3) then storage.scraper_db.DB_PATH if package available
+# 4) finally default to container-friendly /opt/scraper/datadev.db or
+#    local ./data/datadev.db when present
+DB_PATH = os.environ.get("SCRAPER_DB_PATH") or os.environ.get("PRODUCTS_DB")
+if not DB_PATH:
+    try:
+        from storage import scraper_db as _sd
 
-    DB_PATH = getattr(_sd, "DB_PATH", DB_PATH)
-except Exception:
-    pass
+        DB_PATH = getattr(_sd, "DB_PATH", None)
+    except Exception:
+        DB_PATH = None
+
+if not DB_PATH:
+    # prefer local workspace datadev if present (useful for developer runs)
+    local_datadev = os.path.join(os.path.dirname(__file__), "..", "data", "datadev.db")
+    workspace_data = os.path.abspath(os.path.normpath(local_datadev))
+    if os.path.exists(workspace_data):
+        DB_PATH = workspace_data
+    else:
+        # default container path (non-Windows)
+        DB_PATH = "/opt/scraper/datadev.db" if os.name != "nt" else os.path.join(os.path.dirname(__file__), "..", "data", "data.db")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -112,13 +124,25 @@ def detect_gpu_brands(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
                 found.append((label, token))
         return found
 
-    # fallback: use `scraped_items` table and inspect `product_name` or `product_key`
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", ("scraped_items",))
+    # fallback: use `scraped_items` table and prefer structured columns when available
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name= ?", ("scraped_items",))
     if cur.fetchone():
+        # check if structured 'line' column exists
+        cur.execute("PRAGMA table_info(scraped_items)")
+        cols = {r[1] for r in cur.fetchall()}
         for label, token in mapping:
+            if 'line' in cols:
+                cur.execute(
+                    "SELECT 1 FROM scraped_items WHERE lower(line) = ? LIMIT 1",
+                    (token.lower(),),
+                )
+                if cur.fetchone():
+                    found.append((label, token))
+                    continue
+            # fallback to checking product_key or product_name
             cur.execute(
-                "SELECT 1 FROM scraped_items WHERE lower(product_name) LIKE ? LIMIT 1",
-                (f"%{token}%",),
+                "SELECT 1 FROM scraped_items WHERE lower(product_key) LIKE ? OR lower(product_name) LIKE ? LIMIT 1",
+                (f"%{token}%", f"%{token}%"),
             )
             if cur.fetchone():
                 found.append((label, token))
@@ -158,11 +182,37 @@ def detect_gpu_families(conn: sqlite3.Connection, brand_token: str) -> List[Tupl
     families: Dict[str, None] = {}
     # Special-case: Intel ARC has no numeric family tiers (don't expose 'ARC 5000').
     if token == 'arc':
-        # if any row contains 'arc', return single ARC family without numeric key
-        if rows:
-            return [("ARC", "")]
+        # Intel ARC: prefer structured 'line' or 'product_key' to detect presence
+        families = {}
+        # If scraped_items has structured columns, detect models by line
+        cur.execute("PRAGMA table_info(scraped_items)")
+        cols = {r[1] for r in cur.fetchall()}
+        if 'line' in cols and 'model' in cols:
+            cur.execute("SELECT DISTINCT model FROM scraped_items WHERE lower(line)=? AND model IS NOT NULL", (token,))
+            for r in cur.fetchall():
+                m = (r[0] or '').lower()
+                if m:
+                    families[m] = m
         else:
+            # fallback: inspect rows for 'a580'/'b580' tokens
+            for s in rows:
+                for m in re.finditer(r"\b([ab]\d{3,4})\b", s):
+                    families[m.group(1).lower()] = m.group(1).lower()
+
+        # Return sorted by model name
+        items = sorted(families.items())
+        if not items:
+            try:
+                # log DB path and a quick sample to aid debugging in runtime
+                logger.info('detect_gpu_families: no ARC models detected for token=%s DB_PATH=%s', token, DB_PATH)
+                cur.execute("SELECT DISTINCT model, brand, line FROM scraped_items WHERE lower(line)=? LIMIT 10", (token,))
+                samp = cur.fetchall()
+                logger.info('detect_gpu_families: sample rows count=%d sample=%s', len(samp), samp)
+            except Exception:
+                logger.exception('Error while logging ARC debug sample')
             return []
+        # build label/key pairs where key is model token (no numeric family prefix)
+        return [(k.upper(), k) for k, _ in items]
 
     # Find numeric model tokens after the brand token or anywhere in slug
     # Example: 'msi rtx 5080 16gb' -> captures 5080 -> family 5000 -> key '50'
@@ -461,6 +511,15 @@ async def marca_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     payload = query.data.split(":", 1)[1]
     categoria = context.user_data.get("categoria")
+    # Normalize brand text buttons (e.g. 'Intel', 'NVIDIA', 'AMD') to internal tokens
+    brand_map = {
+        'intel': 'arc',
+        'nvidia': 'rtx',
+        'amd': 'rx',
+    }
+    raw_payload = payload
+    if categoria == 'gpu' and payload and payload.lower() in brand_map:
+        payload = brand_map[payload.lower()]
     context.user_data["marca"] = payload
     # CPU brand flow: show explicit families for Intel/AMD
     if categoria == 'cpu' and payload.lower() in ('intel', 'amd'):
@@ -498,14 +557,40 @@ async def marca_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
         if not families:
-            await query.edit_message_text('No hay familias disponibles para esa marca.')
-            return
+            # Fallback for ARC: try to infer models directly from `model`, `product_key` or `product_name`.
+            if payload == 'arc':
+                try:
+                    fb_conn = get_conn()
+                    fb_cur = fb_conn.cursor()
+                    fb_cur.execute(
+                        "SELECT DISTINCT model FROM scraped_items WHERE (lower(line)=? OR lower(product_key) LIKE ? OR lower(product_name) LIKE ?) AND model IS NOT NULL",
+                        (payload, f"%{payload}%", f"%{payload}%"),
+                    )
+                    rows = [r[0] for r in fb_cur.fetchall() if r[0]]
+                    if rows:
+                        families = [(r.upper(), r) for r in sorted(set(rows))]
+                except Exception:
+                    logger.exception('marca_handler: fallback ARC families query failed')
+                finally:
+                    try:
+                        fb_conn.close()
+                    except Exception:
+                        pass
+
+            if not families:
+                logger.info('marca_handler: no families for payload=%s DB_PATH=%s', payload, DB_PATH)
+                await query.edit_message_text('No hay familias disponibles para esa marca.')
+                return
 
         keyboard = []
         row = []
         for label, key in families:
             # show labels like 'RTX 5000' and send family key like '50'
-            row.append(InlineKeyboardButton(label, callback_data=f'familia:{label}::{key}'))
+            display_label = label
+            # For Intel ARC, prefer a simple 'ARC' button label instead of numeric families
+            if payload == 'arc' or (label and label.lower().startswith('arc')):
+                display_label = 'ARC'
+            row.append(InlineKeyboardButton(display_label, callback_data=f'familia:{label}::{key}'))
             if len(row) >= 2:
                 keyboard.append(row)
                 row = []
@@ -698,7 +783,10 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard = []
         row = []
         for label, key in families:
-            row.append(InlineKeyboardButton(label, callback_data=f'familia:{label}::{key}'))
+            display_label = label
+            if marca == 'arc' or (label and label.lower().startswith('arc')):
+                display_label = 'ARC'
+            row.append(InlineKeyboardButton(display_label, callback_data=f'familia:{label}::{key}'))
             if len(row) >= 2:
                 keyboard.append(row)
                 row = []
